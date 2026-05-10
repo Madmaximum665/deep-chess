@@ -48,19 +48,28 @@ export default function Game() {
   // Suppress the onSquareClick that fires after a drag-and-drop
   const justDroppedRef = useRef(false);
 
-  // Board width: measured from container ref
-  const boardContainerRef = useRef<HTMLDivElement>(null);
-  const [boardWidth, setBoardWidth] = useState(360);
+  // Board width — computed from window size, works for both mobile and desktop
+  function calcBoardWidth() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    if (w >= 1024) {
+      // Desktop: leave room for controls panel (288px) + gaps + eval bar (28px)
+      return Math.min(520, Math.floor(Math.min(w - 340, h - 120)));
+    }
+    // Mobile: full viewport width, capped by viewport height minus header/tabs/bar (~130px)
+    return Math.min(w, h - 130);
+  }
+
+  const [boardWidth, setBoardWidth] = useState(() => calcBoardWidth());
+
   useEffect(() => {
-    if (!boardContainerRef.current) return;
-    const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const w = entry.contentRect.width;
-        if (w > 0) setBoardWidth(Math.floor(w));
-      }
-    });
-    ro.observe(boardContainerRef.current);
-    return () => ro.disconnect();
+    function handleResize() {
+      setBoardWidth(calcBoardWidth());
+    }
+    window.addEventListener("resize", handleResize);
+    // Also recalculate once after mount in case initial render was wrong
+    handleResize();
+    return () => window.removeEventListener("resize", handleResize);
   }, []);
 
   function updateCheckHighlight() {
@@ -368,9 +377,8 @@ export default function Game() {
         <div className="flex items-start gap-2 flex-shrink-0">
           <EvalBar evaluation={evaluation} playerColor={playerColor} boardHeight={boardWidth} />
           <div
-            ref={boardContainerRef}
             className="relative"
-            style={{ width: "min(calc(100vw - 340px), calc(100vh - 120px))", maxWidth: 520 }}
+            style={{ width: boardWidth, height: boardWidth }}
           >
             <Chessboard
               options={{
@@ -455,9 +463,8 @@ export default function Game() {
           <div className="flex flex-col flex-1 overflow-hidden">
             {/* Board fills full width */}
             <div
-              ref={boardContainerRef}
-              className="relative w-full"
-              style={{ aspectRatio: "1 / 1" }}
+              className="relative"
+              style={{ width: boardWidth, height: boardWidth }}
             >
               <Chessboard
                 options={{

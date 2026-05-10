@@ -1,0 +1,478 @@
+Build a chess website called "DeepChess" using React + Vite.
+Deployable on Vercel with zero backend. Everything runs in the browser.
+
+═══════════════════════════════════════════════
+TECH STACK
+═══════════════════════════════════════════════
+- React + Vite
+- React Router DOM (client side routing)
+- chess.js (ALL game logic and move validation)
+- react-chessboard (board rendering only)
+- Tailwind CSS
+- Stockfish via Web Worker from public folder
+
+Install:
+  npm install chess.js react-chessboard stockfish react-router-dom
+
+═══════════════════════════════════════════════
+VERCEL SETUP
+═══════════════════════════════════════════════
+Create vercel.json in root:
+  {
+    "rewrites": [{ "source": "/(.*)", "destination": "/" }]
+  }
+
+Create vite.config.js:
+  import { defineConfig } from 'vite'
+  import react from '@vitejs/plugin-react'
+  export default defineConfig({
+    plugins: [react()],
+    base: '/',
+    optimizeDeps: { exclude: ['stockfish'] },
+    server: {
+      headers: {
+        'Cross-Origin-Opener-Policy': 'same-origin',
+        'Cross-Origin-Embedder-Policy': 'require-corp'
+      }
+    }
+  })
+
+Add to package.json scripts:
+  "postinstall": "cp node_modules/stockfish/src/stockfish.js public/stockfish.js"
+  (Windows: "postinstall": "copy node_modules\\stockfish\\src\\stockfish.js public\\stockfish.js")
+
+Before running locally also run:
+  cp node_modules/stockfish/src/stockfish.js public/stockfish.js
+
+═══════════════════════════════════════════════
+PROJECT STRUCTURE
+═══════════════════════════════════════════════
+src/
+├── main.jsx
+├── App.jsx
+├── pages/
+│   ├── Home.jsx
+│   └── Game.jsx
+├── components/
+│   ├── ChessBoard.jsx
+│   ├── ControlsPanel.jsx
+│   ├── EvalBar.jsx
+│   ├── MoveHistory.jsx
+│   └── PromotionDialog.jsx
+└── hooks/
+    └── useStockfish.js
+
+═══════════════════════════════════════════════
+GAME STATE
+═══════════════════════════════════════════════
+Manage this state in Game.jsx:
+
+  const [fen, setFen]                     = useState(new Chess().fen())
+  const [chess]                           = useState(() => new Chess())
+  const [status, setStatus]               = useState('playing')
+      // 'playing' | 'thinking' | 'gameover'
+  const [playerColor, setPlayerColor]     = useState('white')
+  const [difficulty, setDifficulty]       = useState('Medium')
+  const [selectedSquare, setSelectedSquare] = useState(null)
+  const [legalMoveSquares, setLegalMoveSquares] = useState({})
+  const [lastMove, setLastMove]           = useState(null)
+  const [moveHistory, setMoveHistory]     = useState([])
+  const [gameResult, setGameResult]       = useState(null)
+  const [evaluation, setEvaluation]       = useState(0)
+  const [hintSquares, setHintSquares]     = useState({})
+  const [checkSquare, setCheckSquare]     = useState(null)
+  const [promotionMove, setPromotionMove] = useState(null)
+      // { from, to } when promotion dialog needed
+
+═══════════════════════════════════════════════
+STOCKFISH HOOK — useStockfish.js
+═══════════════════════════════════════════════
+Implement exactly as follows:
+
+STATE:
+  workerRef  = useRef(null)     ← the Web Worker instance
+  resolveRef = useRef(null)     ← holds current Promise resolver
+  isReady    = useState(false)
+  isThinking = useState(false)
+
+INIT (useEffect on mount):
+  1. const worker = new Worker('/stockfish.js')
+  2. workerRef.current = worker
+  3. worker.onmessage = (e) => {
+       const msg = e.data
+       if (msg === 'uciok' || msg === 'readyok') setIsReady(true)
+       if (msg.startsWith('bestmove') && resolveRef.current) {
+         const parts = msg.split(' ')
+         const move  = parts[1]
+         resolveRef.current(move === '(none)' ? null : move)
+         resolveRef.current = null
+         setIsThinking(false)
+       }
+     }
+  4. worker.onerror = () => {
+       if (resolveRef.current) { resolveRef.current(null); resolveRef.current = null }
+       setIsThinking(false)
+     }
+  5. worker.postMessage('uci')
+  6. worker.postMessage('isready')
+  7. Cleanup on unmount: worker.postMessage('quit'); worker.terminate()
+
+getBestMove(fen, difficulty):
+  DEPTH_MAP = { Easy: 2, Medium: 10, Hard: 20 }
+  1. If !workerRef.current → return Promise.resolve(null)
+  2. setIsThinking(true)
+  3. return new Promise((resolve) => {
+       workerRef.current.postMessage('stop')
+       setTimeout(() => {
+         resolveRef.current = resolve
+         workerRef.current.postMessage(`position fen ${fen}`)
+         workerRef.current.postMessage(`go depth ${DEPTH_MAP[difficulty]}`)
+       }, 50)
+     })
+
+stopSearch():
+  workerRef.current?.postMessage('stop')
+
+EXPORT: { getBestMove, stopSearch, isReady, isThinking }
+
+═══════════════════════════════════════════════
+ALGORITHM — NEW GAME
+═══════════════════════════════════════════════
+function newGame():
+  1. stopSearch()                    ← cancel any running Stockfish search
+  2. chess.reset()                   ← reset chess.js instance
+  3. setFen(chess.fen())
+  4. setStatus('playing')
+  5. setSelectedSquare(null)
+  6. setLegalMoveSquares({})
+  7. setLastMove(null)
+  8. setMoveHistory([])
+  9. setGameResult(null)
+  10. setEvaluation(0)
+  11. setHintSquares({})
+  12. setCheckSquare(null)
+  13. setPromotionMove(null)
+  14. If playerColor === 'black':
+        → call botMove() after 300ms delay (setTimeout)
+
+═══════════════════════════════════════════════
+ALGORITHM — SQUARE CLICK
+═══════════════════════════════════════════════
+function onSquareClick(square):
+  1. If status !== 'playing' → return
+  2. If chess.turn() !== playerColor[0] → return
+     (chess.turn() returns 'w' or 'b', playerColor is 'white'/'black')
+
+  CASE A — square already selected AND clicked square is a legal target:
+    3. Check if square is in legalMoveSquares keys → if yes → call makePlayerMove(selectedSquare, square)
+    4. return
+
+  CASE B — clicking own piece:
+    5. Get piece = chess.get(square)
+    6. If piece && piece.color === playerColor[0]:
+         getLegalMovesForSquare(square)
+         return
+
+  CASE C — anything else:
+    7. clearSelection()
+
+function getLegalMovesForSquare(square):
+  1. const moves = chess.moves({ square, verbose: true })
+  2. If moves.length === 0 → clearSelection() → return
+  3. setSelectedSquare(square)
+  4. Build highlight object:
+       const highlights = {}
+       highlights[square] = { background: 'rgba(255,255,0,0.4)' }
+       moves.forEach(m => {
+         highlights[m.to] = chess.get(m.to)
+           ? { background: 'radial-gradient(circle, rgba(255,0,0,0.4) 70%, transparent 70%)' }
+           : { borderRadius: '50%', background: 'radial-gradient(circle, rgba(0,0,0,0.2) 40%, transparent 40%)' }
+       })
+  5. setLegalMoveSquares(highlights)
+
+function clearSelection():
+  setSelectedSquare(null)
+  setLegalMoveSquares({})
+
+═══════════════════════════════════════════════
+ALGORITHM — DRAG AND DROP
+═══════════════════════════════════════════════
+function onPieceDrop(sourceSquare, targetSquare, piece):
+  1. If status !== 'playing' → return false
+  2. If chess.turn() !== playerColor[0] → return false
+  3. const pieceColor = piece[0]  ← 'w' or 'b' (react-chessboard format)
+  4. If pieceColor !== playerColor[0] → return false
+
+  5. Check promotion:
+       const movingPiece = chess.get(sourceSquare)
+       const isPromotion = movingPiece?.type === 'p' &&
+         ((playerColor === 'white' && targetSquare[1] === '8') ||
+          (playerColor === 'black' && targetSquare[1] === '1'))
+
+  6. If isPromotion:
+       setPromotionMove({ from: sourceSquare, to: targetSquare })
+       return false   ← reject drop, show dialog instead
+
+  7. return makePlayerMove(sourceSquare, targetSquare)
+
+═══════════════════════════════════════════════
+ALGORITHM — PLAYER MOVE
+═══════════════════════════════════════════════
+function makePlayerMove(from, to, promotion = 'q'):
+  1. If status !== 'playing' → return false
+  2. Attempt: const result = chess.move({ from, to, promotion })
+  3. If result === null → return false   ← illegal move, chess.js rejected
+
+  4. clearSelection()
+  5. setFen(chess.fen())
+  6. setLastMove({ from, to })
+  7. setMoveHistory(prev => [...prev, result.san])
+  8. updateCheckHighlight()
+  9. setHintSquares({})
+
+  10. If checkGameOver() → return true   ← game ended
+
+  11. setStatus('thinking')
+  12. Call botMove()
+  13. return true
+
+═══════════════════════════════════════════════
+ALGORITHM — BOT MOVE
+═══════════════════════════════════════════════
+async function botMove():
+  1. const currentFen = chess.fen()
+  2. const uci = await getBestMove(currentFen, difficulty)
+
+  3. If uci === null:
+       checkGameOver()
+       return
+
+  4. Parse UCI:
+       const from      = uci.slice(0, 2)
+       const to        = uci.slice(2, 4)
+       const promotion = uci.length > 4 ? uci[4] : 'q'
+
+  5. const result = chess.move({ from, to, promotion })
+  6. If result === null → return   ← should never happen but guard anyway
+
+  7. setFen(chess.fen())
+  8. setLastMove({ from, to })
+  9. setMoveHistory(prev => [...prev, result.san])
+  10. updateCheckHighlight()
+
+  11. If checkGameOver() → return
+
+  12. setStatus('playing')
+
+═══════════════════════════════════════════════
+ALGORITHM — GAME OVER CHECK
+═══════════════════════════════════════════════
+function checkGameOver():
+  1. If !chess.isGameOver() → return false
+
+  2. Determine result string:
+       if chess.isCheckmate():
+         ← chess.turn() is the LOSER (they have no moves)
+         if chess.turn() === playerColor[0]:
+           result = 'Bot Wins!'
+         else:
+           result = 'You Win!'
+
+       else if chess.isStalemate():
+           result = 'Draw — Stalemate'
+       else if chess.isThreefoldRepetition():
+           result = 'Draw — Repetition'
+       else if chess.isInsufficientMaterial():
+           result = 'Draw — Insufficient Material'
+       else:
+           result = 'Draw'
+
+  3. setGameResult(result)
+  4. setStatus('gameover')
+
+  5. Save to localStorage:
+       const stats = JSON.parse(localStorage.getItem('deepchess_stats') || '{"wins":0,"losses":0,"draws":0}')
+       if result === 'You Win!'  → stats.wins++
+       if result === 'Bot Wins!' → stats.losses++
+       if result includes 'Draw' → stats.draws++
+       localStorage.setItem('deepchess_stats', JSON.stringify(stats))
+
+  6. return true
+
+═══════════════════════════════════════════════
+ALGORITHM — CHECK HIGHLIGHT
+═══════════════════════════════════════════════
+function updateCheckHighlight():
+  1. If chess.inCheck():
+       const turn = chess.turn()     ← 'w' or 'b'
+       Find king square:
+         loop through all squares
+         const piece = chess.get(square)
+         if piece?.type === 'k' && piece.color === turn:
+           setCheckSquare(square)
+           return
+  2. Else: setCheckSquare(null)
+
+═══════════════════════════════════════════════
+ALGORITHM — UNDO
+═══════════════════════════════════════════════
+function undoMove():
+  1. If status !== 'playing' → return
+  2. If moveHistory.length < 2 → return   ← need at least 2 half-moves
+
+  3. chess.undo()   ← undo bot move
+  4. chess.undo()   ← undo player move
+
+  5. setFen(chess.fen())
+  6. setMoveHistory(prev => prev.slice(0, -2))
+  7. setLastMove(null)
+  8. clearSelection()
+  9. updateCheckHighlight()
+  10. setStatus('playing')
+
+═══════════════════════════════════════════════
+ALGORITHM — HINT
+═══════════════════════════════════════════════
+async function getHint():
+  1. If status !== 'playing' → return
+  2. const uci = await getBestMove(chess.fen(), 'Hard')
+  3. If uci === null → return
+  4. const from = uci.slice(0, 2)
+  5. const to   = uci.slice(2, 4)
+  6. setHintSquares({
+       [from]: { background: 'rgba(0, 255, 0, 0.5)' },
+       [to]:   { background: 'rgba(0, 255, 0, 0.3)' }
+     })
+  7. setTimeout(() => setHintSquares({}), 2000)
+
+═══════════════════════════════════════════════
+ALGORITHM — PROMOTION
+═══════════════════════════════════════════════
+function onPromotionSelect(piece):
+  ← piece is 'q' | 'r' | 'b' | 'n'
+  1. If !promotionMove → return
+  2. makePlayerMove(promotionMove.from, promotionMove.to, piece)
+  3. setPromotionMove(null)
+
+function onPromotionCancel():
+  1. setPromotionMove(null)
+
+═══════════════════════════════════════════════
+ALGORITHM — PLAYER COLOR CHANGE
+═══════════════════════════════════════════════
+function onColorChange(newColor):
+  1. setPlayerColor(newColor)
+  2. Call newGame() inside useEffect that watches playerColor
+     useEffect(() => { newGame() }, [playerColor])
+
+═══════════════════════════════════════════════
+BOARD HIGHLIGHTS — HOW TO COMBINE ALL LAYERS
+═══════════════════════════════════════════════
+Pass customSquareStyles to react-chessboard.
+Build the styles object by merging in this order
+(later entries override earlier ones):
+
+  const customSquareStyles = {
+    // 1. Last move highlight
+    ...(lastMove ? {
+      [lastMove.from]: { background: 'rgba(155, 199, 0, 0.41)' },
+      [lastMove.to]:   { background: 'rgba(155, 199, 0, 0.41)' },
+    } : {}),
+
+    // 2. Legal move dots
+    ...legalMoveSquares,
+
+    // 3. Selected square
+    ...(selectedSquare ? {
+      [selectedSquare]: { background: 'rgba(255, 255, 0, 0.5)' }
+    } : {}),
+
+    // 4. Check highlight (highest priority — goes last)
+    ...(checkSquare ? {
+      [checkSquare]: { background: 'rgba(255, 0, 0, 0.6)' }
+    } : {}),
+
+    // 5. Hint highlight
+    ...hintSquares,
+  }
+
+═══════════════════════════════════════════════
+REACT-CHESSBOARD PROPS
+═══════════════════════════════════════════════
+<Chessboard
+  position={fen}
+  onPieceDrop={onPieceDrop}
+  onSquareClick={onSquareClick}
+  boardOrientation={playerColor}
+  customSquareStyles={customSquareStyles}
+  animationDuration={200}
+  boardWidth={Math.min(560, window.innerWidth - 32)}
+/>
+
+═══════════════════════════════════════════════
+CRITICAL RULES — NEVER BREAK THESE
+═══════════════════════════════════════════════
+1. NEVER modify chess.js state directly — only through chess.move(), chess.undo(), chess.reset()
+2. ALWAYS call chess.move() and check return value — if null, move is illegal, abort
+3. NEVER call botMove() if status !== 'playing' or 'thinking'
+4. ALWAYS send 'stop' before a new Stockfish search (with 50ms delay after)
+5. chess.turn() returns 'w'/'b' AFTER the move is applied
+   so after player moves white, chess.turn() === 'b' (bot's turn) — this is correct
+6. After checkmate chess.turn() returns the LOSING side (the one with no moves)
+7. resolveRef.current must be set to null after each bestmove to avoid double resolving
+8. On New Game always call stopSearch() first to kill any pending Stockfish search
+9. promotion piece must always be lowercase: 'q' 'r' 'b' 'n'
+10. setFen(chess.fen()) must be called after EVERY chess.move() or chess.undo()
+    to keep react-chessboard in sync with chess.js
+
+═══════════════════════════════════════════════
+PAGES
+═══════════════════════════════════════════════
+
+HOME PAGE (src/pages/Home.jsx):
+- Site name and tagline
+- Play Now button → navigate('/game')
+- Show stats from localStorage key 'deepchess_stats'
+  { wins, losses, draws }
+- Clean minimal layout
+
+GAME PAGE (src/pages/Game.jsx):
+- Contains ALL game state and logic described above
+- Board on left, controls on right
+- Mobile: board on top, controls below
+- Controls panel contains:
+    Difficulty buttons: Easy | Medium | Hard
+    Color toggle: White | Black
+    Buttons: New Game, Flip Board, Undo, Hint
+    Move history (scrollable, two columns: "1. e4  e5")
+    Evaluation bar (vertical, updates after each move)
+    Status text: Your Turn / Bot Thinking... / Check! / result
+- Game over overlay on board showing result + Play Again button
+
+═══════════════════════════════════════════════
+DESIGN
+═══════════════════════════════════════════════
+- Dark themed
+- Clean and modern
+- Fully mobile responsive
+- Smooth animations on moves and highlights
+- Show spinner / pulsing text when bot is thinking
+- No external image assets needed
+  (react-chessboard provides its own piece images)
+
+═══════════════════════════════════════════════
+DEPLOYMENT
+═══════════════════════════════════════════════
+README.md must include:
+
+  ## Deploy to Vercel
+  1. Push to GitHub
+  2. Import repo on vercel.com
+  3. Framework: Vite
+  4. Build command: npm run build
+  5. Output directory: dist
+  6. Deploy — no env variables needed
+
+  ## Run Locally
+  npm install
+  npm run dev

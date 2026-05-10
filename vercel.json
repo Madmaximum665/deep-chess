@@ -1,0 +1,9 @@
+{
+  "buildCommand": "pnpm --filter @workspace/deep-chess run build",
+  "outputDirectory": "artifacts/deep-chess/dist/public",
+  "installCommand": "pnpm install --ignore-scripts",
+  "framework": null,
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

@@ -43,6 +43,9 @@ export default function Game() {
   const statusRef = useRef(status);
   statusRef.current = status;
 
+  // Suppress the onSquareClick that fires after a drag-and-drop
+  const justDroppedRef = useRef(false);
+
   // Board width: measured from container ref
   const boardContainerRef = useRef<HTMLDivElement>(null);
   const [boardWidth, setBoardWidth] = useState(480);
@@ -117,19 +120,18 @@ export default function Game() {
       const to = uci.slice(2, 4);
       const promotion = uci.length > 4 ? uci[4] : "q";
 
-      const result = chess.move({ from, to, promotion });
+      let result;
+      try {
+        result = chess.move({ from, to, promotion });
+      } catch {
+        result = null;
+      }
       if (result === null) return;
 
       setFen(chess.fen());
       setLastMove({ from, to });
       setMoveHistory((prev) => [...prev, result.san]);
       updateCheckHighlight();
-
-      // Update evaluation after bot move
-      const evalFen = chess.fen();
-      getBestMove(evalFen, currentDifficulty).then(() => {
-        // We don't actually use this for eval, we use a rough estimate
-      });
 
       if (checkGameOver()) return;
       setStatus("playing");
@@ -196,7 +198,12 @@ export default function Game() {
   function makePlayerMove(from: string, to: string, promotion: string = "q"): boolean {
     if (statusRef.current !== "playing") return false;
 
-    const result = chess.move({ from, to, promotion });
+    let result;
+    try {
+      result = chess.move({ from, to, promotion });
+    } catch {
+      result = null;
+    }
     if (result === null) return false;
 
     clearSelection();
@@ -215,6 +222,11 @@ export default function Game() {
   }
 
   function onSquareClick(square: string) {
+    // Suppress click that fires right after a drag-and-drop
+    if (justDroppedRef.current) {
+      justDroppedRef.current = false;
+      return;
+    }
     if (statusRef.current !== "playing") return;
     if (chess.turn() !== playerColor[0]) return;
 
@@ -235,11 +247,13 @@ export default function Game() {
     clearSelection();
   }
 
-  function onPieceDrop(sourceSquare: string, targetSquare: string, piece: string): boolean {
+  function onPieceDrop(sourceSquare: string, targetSquare: string, pieceType: string): boolean {
     if (statusRef.current !== "playing") return false;
+    if (!targetSquare) return false;
     if (chess.turn() !== playerColor[0]) return false;
 
-    const pieceColor = piece[0];
+    // pieceType is like "wP", "bK" — first char is color (w/b)
+    const pieceColor = pieceType[0].toLowerCase();
     if (pieceColor !== playerColor[0]) return false;
 
     const movingPiece = chess.get(sourceSquare as Parameters<typeof chess.get>[0]);
@@ -249,11 +263,16 @@ export default function Game() {
         (playerColor === "black" && targetSquare[1] === "1"));
 
     if (isPromotion) {
+      justDroppedRef.current = true;
       setPromotionMove({ from: sourceSquare, to: targetSquare });
       return false;
     }
 
-    return makePlayerMove(sourceSquare, targetSquare);
+    const success = makePlayerMove(sourceSquare, targetSquare);
+    // Always set the flag — whether move succeeded or not, suppress the
+    // spurious onSquareClick that fires after every drop
+    justDroppedRef.current = true;
+    return success;
   }
 
   function onPromotionSelect(piece: "q" | "r" | "b" | "n") {
@@ -341,15 +360,18 @@ export default function Game() {
             style={{ width: "min(calc(100vw - 320px), calc(100vh - 100px))", maxWidth: 520 }}
           >
             <Chessboard
-              position={fen}
-              onPieceDrop={onPieceDrop}
-              onSquareClick={onSquareClick}
-              boardOrientation={boardOrientation}
-              customSquareStyles={customSquareStyles}
-              animationDuration={200}
-              boardWidth={boardWidth}
-              customDarkSquareStyle={{ backgroundColor: "#4a4a8a" }}
-              customLightSquareStyle={{ backgroundColor: "#d4d4f0" }}
+              options={{
+                position: fen,
+                boardOrientation: boardOrientation,
+                squareStyles: customSquareStyles,
+                animationDurationInMs: 200,
+                darkSquareStyle: { backgroundColor: "#4a4a8a" },
+                lightSquareStyle: { backgroundColor: "#d4d4f0" },
+                boardStyle: { width: boardWidth, height: boardWidth },
+                onSquareClick: ({ square }) => onSquareClick(square),
+                onPieceDrop: ({ sourceSquare, targetSquare, piece }) =>
+                  onPieceDrop(sourceSquare, targetSquare ?? "", piece.pieceType),
+              }}
             />
 
             {/* Promotion dialog */}

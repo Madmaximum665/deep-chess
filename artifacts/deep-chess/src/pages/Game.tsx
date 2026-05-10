@@ -38,39 +38,45 @@ export default function Game() {
   const [hintSquares, setHintSquares] = useState<Record<string, object>>({});
   const [checkSquare, setCheckSquare] = useState<string | null>(null);
   const [promotionMove, setPromotionMove] = useState<{ from: string; to: string } | null>(null);
-  // Mobile: toggle between board view and controls view
   const [mobileTab, setMobileTab] = useState<"board" | "controls">("board");
 
   const { getBestMove, stopSearch, isReady, isThinking } = useStockfish();
   const statusRef = useRef(status);
   statusRef.current = status;
-
-  // Suppress the onSquareClick that fires after a drag-and-drop
   const justDroppedRef = useRef(false);
 
-  // Board width — computed from window size, works for both mobile and desktop
-  function calcBoardWidth() {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    if (w >= 1024) {
-      // Desktop: leave room for controls panel (288px) + gaps + eval bar (28px)
-      return Math.min(520, Math.floor(Math.min(w - 340, h - 120)));
-    }
-    // Mobile: full viewport width, capped by viewport height minus header/tabs/bar (~130px)
-    return Math.min(w, h - 130);
-  }
-
-  const [boardWidth, setBoardWidth] = useState(() => calcBoardWidth());
+  // ── Board sizing ──────────────────────────────────────────────────────────
+  // Use a ref for the mobile board container so we can measure it accurately.
+  const mobileBoardRef = useRef<HTMLDivElement>(null);
+  const desktopBoardRef = useRef<HTMLDivElement>(null);
+  const [boardWidth, setBoardWidth] = useState(360);
 
   useEffect(() => {
-    function handleResize() {
-      setBoardWidth(calcBoardWidth());
+    function measure() {
+      // On mobile (< 1024px) measure the mobile container, else the desktop one
+      const isMobile = window.innerWidth < 1024;
+      const el = isMobile ? mobileBoardRef.current : desktopBoardRef.current;
+      if (el) {
+        const w = el.getBoundingClientRect().width;
+        if (w > 10) setBoardWidth(Math.floor(w));
+      }
     }
-    window.addEventListener("resize", handleResize);
-    // Also recalculate once after mount in case initial render was wrong
-    handleResize();
-    return () => window.removeEventListener("resize", handleResize);
+
+    measure();
+    window.addEventListener("resize", measure);
+
+    // Also observe both containers with ResizeObserver for accuracy
+    const ro = new ResizeObserver(measure);
+    if (mobileBoardRef.current) ro.observe(mobileBoardRef.current);
+    if (desktopBoardRef.current) ro.observe(desktopBoardRef.current);
+
+    return () => {
+      window.removeEventListener("resize", measure);
+      ro.disconnect();
+    };
   }, []);
+
+  // ── Game logic ────────────────────────────────────────────────────────────
 
   function updateCheckHighlight() {
     if (chess.inCheck()) {
@@ -89,7 +95,6 @@ export default function Game() {
 
   function checkGameOver(): boolean {
     if (!chess.isGameOver()) return false;
-
     let result: string;
     if (chess.isCheckmate()) {
       result = chess.turn() === playerColor[0] ? "Bot Wins!" : "You Win!";
@@ -102,10 +107,8 @@ export default function Game() {
     } else {
       result = "Draw";
     }
-
     setGameResult(result);
     setStatus("gameover");
-
     const stats = JSON.parse(
       localStorage.getItem("deepchess_stats") || '{"wins":0,"losses":0,"draws":0}'
     );
@@ -113,7 +116,6 @@ export default function Game() {
     else if (result === "Bot Wins!") stats.losses++;
     else if (result.includes("Draw")) stats.draws++;
     localStorage.setItem("deepchess_stats", JSON.stringify(stats));
-
     return true;
   }
 
@@ -121,29 +123,17 @@ export default function Game() {
     async (currentDifficulty: string) => {
       const currentFen = chess.fen();
       const uci = await getBestMove(currentFen, currentDifficulty);
-
-      if (uci === null) {
-        checkGameOver();
-        return;
-      }
-
+      if (uci === null) { checkGameOver(); return; }
       const from = uci.slice(0, 2);
       const to = uci.slice(2, 4);
       const promotion = uci.length > 4 ? uci[4] : "q";
-
       let result;
-      try {
-        result = chess.move({ from, to, promotion });
-      } catch {
-        result = null;
-      }
+      try { result = chess.move({ from, to, promotion }); } catch { result = null; }
       if (result === null) return;
-
       setFen(chess.fen());
       setLastMove({ from, to });
       setMoveHistory((prev) => [...prev, result.san]);
       updateCheckHighlight();
-
       if (checkGameOver()) return;
       setStatus("playing");
     },
@@ -169,16 +159,12 @@ export default function Game() {
       setCheckSquare(null);
       setPromotionMove(null);
       setMobileTab("board");
-
-      if (pc === "black") {
-        setTimeout(() => botMove(d), 300);
-      }
+      if (pc === "black") setTimeout(() => botMove(d), 300);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [playerColor, difficulty, chess, stopSearch, botMove]
   );
 
-  // When player color changes, start a new game
   useEffect(() => {
     setBoardOrientation(playerColor);
     newGame(playerColor, difficulty);
@@ -192,10 +178,7 @@ export default function Game() {
 
   function getLegalMovesForSquare(square: string) {
     const moves = chess.moves({ square: square as Parameters<typeof chess.moves>[0]["square"], verbose: true });
-    if (moves.length === 0) {
-      clearSelection();
-      return;
-    }
+    if (moves.length === 0) { clearSelection(); return; }
     setSelectedSquare(square);
     const highlights: Record<string, object> = {};
     highlights[square] = { background: "rgba(255,255,0,0.4)" };
@@ -207,26 +190,18 @@ export default function Game() {
     setLegalMoveSquares(highlights);
   }
 
-  function makePlayerMove(from: string, to: string, promotion: string = "q"): boolean {
+  function makePlayerMove(from: string, to: string, promotion = "q"): boolean {
     if (statusRef.current !== "playing") return false;
-
     let result;
-    try {
-      result = chess.move({ from, to, promotion });
-    } catch {
-      result = null;
-    }
+    try { result = chess.move({ from, to, promotion }); } catch { result = null; }
     if (result === null) return false;
-
     clearSelection();
     setFen(chess.fen());
     setLastMove({ from, to });
     setMoveHistory((prev) => [...prev, result.san]);
     updateCheckHighlight();
     setHintSquares({});
-
     if (checkGameOver()) return true;
-
     setStatus("thinking");
     const d = difficulty;
     setTimeout(() => botMove(d), 0);
@@ -234,24 +209,12 @@ export default function Game() {
   }
 
   function onSquareClick(square: string) {
-    if (justDroppedRef.current) {
-      justDroppedRef.current = false;
-      return;
-    }
+    if (justDroppedRef.current) { justDroppedRef.current = false; return; }
     if (statusRef.current !== "playing") return;
     if (chess.turn() !== playerColor[0]) return;
-
-    if (selectedSquare && legalMoveSquares[square]) {
-      makePlayerMove(selectedSquare, square);
-      return;
-    }
-
+    if (selectedSquare && legalMoveSquares[square]) { makePlayerMove(selectedSquare, square); return; }
     const piece = chess.get(square as Parameters<typeof chess.get>[0]);
-    if (piece && piece.color === playerColor[0]) {
-      getLegalMovesForSquare(square);
-      return;
-    }
-
+    if (piece && piece.color === playerColor[0]) { getLegalMovesForSquare(square); return; }
     clearSelection();
   }
 
@@ -259,22 +222,17 @@ export default function Game() {
     if (statusRef.current !== "playing") return false;
     if (!targetSquare) return false;
     if (chess.turn() !== playerColor[0]) return false;
-
-    const pieceColor = pieceType[0].toLowerCase();
-    if (pieceColor !== playerColor[0]) return false;
-
+    if (pieceType[0].toLowerCase() !== playerColor[0]) return false;
     const movingPiece = chess.get(sourceSquare as Parameters<typeof chess.get>[0]);
     const isPromotion =
       movingPiece?.type === "p" &&
       ((playerColor === "white" && targetSquare[1] === "8") ||
         (playerColor === "black" && targetSquare[1] === "1"));
-
     if (isPromotion) {
       justDroppedRef.current = true;
       setPromotionMove({ from: sourceSquare, to: targetSquare });
       return false;
     }
-
     const success = makePlayerMove(sourceSquare, targetSquare);
     justDroppedRef.current = true;
     return success;
@@ -286,15 +244,10 @@ export default function Game() {
     setPromotionMove(null);
   }
 
-  function onPromotionCancel() {
-    setPromotionMove(null);
-  }
-
   function undoMove() {
     if (status !== "playing") return;
     if (moveHistory.length < 2) return;
-    chess.undo();
-    chess.undo();
+    chess.undo(); chess.undo();
     setFen(chess.fen());
     setMoveHistory((prev) => prev.slice(0, -2));
     setLastMove(null);
@@ -317,53 +270,72 @@ export default function Game() {
   }
 
   const customSquareStyles: Record<string, object> = {
-    ...(lastMove
-      ? {
-          [lastMove.from]: { background: "rgba(155, 199, 0, 0.41)" },
-          [lastMove.to]: { background: "rgba(155, 199, 0, 0.41)" },
-        }
-      : {}),
+    ...(lastMove ? {
+      [lastMove.from]: { background: "rgba(155, 199, 0, 0.41)" },
+      [lastMove.to]: { background: "rgba(155, 199, 0, 0.41)" },
+    } : {}),
     ...legalMoveSquares,
     ...(selectedSquare ? { [selectedSquare]: { background: "rgba(255, 255, 0, 0.5)" } } : {}),
     ...(checkSquare ? { [checkSquare]: { background: "rgba(255, 0, 0, 0.6)" } } : {}),
     ...hintSquares,
   };
 
-  const statusText = status === "thinking" || isThinking
-    ? "Bot is thinking..."
-    : status === "gameover"
-    ? gameResult ?? "Game over"
+  const statusText =
+    status === "thinking" || isThinking ? "Bot is thinking..."
+    : status === "gameover" ? (gameResult ?? "Game over")
     : "Your turn";
 
+  // Shared chessboard options — single source of truth
+  const boardOptions = {
+    position: fen,
+    boardOrientation,
+    squareStyles: customSquareStyles,
+    animationDurationInMs: 200,
+    darkSquareStyle: { backgroundColor: "#4a4a8a" },
+    lightSquareStyle: { backgroundColor: "#d4d4f0" },
+    boardStyle: { width: boardWidth, height: boardWidth },
+    onSquareClick: ({ square }: { square: string }) => onSquareClick(square),
+    onPieceDrop: ({ sourceSquare, targetSquare, piece }: {
+      sourceSquare: string;
+      targetSquare: string | null;
+      piece: { pieceType: string };
+    }) => onPieceDrop(sourceSquare, targetSquare ?? "", piece.pieceType),
+  };
+
+  const gameOverOverlay = status === "gameover" && gameResult && (
+    <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center gap-4 z-10">
+      <div className="text-center">
+        <div className="text-4xl mb-2">
+          {gameResult === "You Win!" ? "🏆" : gameResult === "Bot Wins!" ? "😔" : "🤝"}
+        </div>
+        <h2 className="text-white text-2xl font-black">{gameResult}</h2>
+      </div>
+      <button onClick={() => newGame()} className="px-8 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl transition-colors">
+        Play Again
+      </button>
+    </div>
+  );
+
   return (
-    <div className="h-screen bg-[#1a1a2e] flex flex-col overflow-hidden">
+    <div className="h-[100dvh] bg-[#1a1a2e] flex flex-col overflow-hidden">
 
       {/* ── Header ── */}
       <header className="flex items-center justify-between px-4 py-2 border-b border-[#2a2d4a] flex-shrink-0">
-        <button
-          onClick={() => navigate("/")}
-          className="flex items-center gap-2 text-white hover:text-indigo-400 transition-colors"
-        >
+        <button onClick={() => navigate("/")} className="flex items-center gap-2 text-white hover:text-indigo-400 transition-colors">
           <span className="text-xl">♟</span>
-          <span className="font-black text-lg">
-            Deep<span className="text-indigo-400">Chess</span>
-          </span>
+          <span className="font-black text-lg">Deep<span className="text-indigo-400">Chess</span></span>
         </button>
         <div className="flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${isReady ? "bg-emerald-400" : "bg-amber-400 animate-pulse"}`} />
-          <span className="text-xs text-[#8b8fa8] hidden sm:inline">
-            {isReady ? "Engine ready" : "Loading engine..."}
-          </span>
+          <span className="text-xs text-[#8b8fa8]">{isReady ? "Engine ready" : "Loading..."}</span>
         </div>
       </header>
 
       {/* ── Mobile status bar ── */}
-      <div className={`lg:hidden flex-shrink-0 px-4 py-1.5 text-xs font-semibold text-center transition-all ${
-        status === "thinking" || isThinking
-          ? "bg-amber-500/20 text-amber-400"
-          : status === "gameover"
-          ? "bg-red-500/20 text-red-400"
-          : "bg-emerald-500/20 text-emerald-400"
+      <div className={`lg:hidden flex-shrink-0 px-4 py-1.5 text-xs font-semibold text-center ${
+        status === "thinking" || isThinking ? "bg-amber-500/20 text-amber-400"
+        : status === "gameover" ? "bg-red-500/20 text-red-400"
+        : "bg-emerald-500/20 text-emerald-400"
       }`}>
         {(status === "thinking" || isThinking) && (
           <span className="inline-block w-1.5 h-1.5 bg-amber-400 rounded-full mr-1.5 animate-pulse" />
@@ -371,184 +343,104 @@ export default function Game() {
         {statusText}
       </div>
 
-      {/* ── Desktop layout ── */}
+      {/* ── Desktop layout (lg+) ── */}
       <div className="hidden lg:flex flex-1 items-start justify-center gap-4 p-5 overflow-hidden">
-        {/* Board + eval bar */}
         <div className="flex items-start gap-2 flex-shrink-0">
           <EvalBar evaluation={evaluation} playerColor={playerColor} boardHeight={boardWidth} />
-          <div
-            className="relative"
-            style={{ width: boardWidth, height: boardWidth }}
-          >
-            <Chessboard
-              options={{
-                position: fen,
-                boardOrientation,
-                squareStyles: customSquareStyles,
-                animationDurationInMs: 200,
-                darkSquareStyle: { backgroundColor: "#4a4a8a" },
-                lightSquareStyle: { backgroundColor: "#d4d4f0" },
-                boardStyle: { width: boardWidth, height: boardWidth },
-                onSquareClick: ({ square }) => onSquareClick(square),
-                onPieceDrop: ({ sourceSquare, targetSquare, piece }) =>
-                  onPieceDrop(sourceSquare, targetSquare ?? "", piece.pieceType),
-              }}
-            />
-            {promotionMove && (
-              <PromotionDialog playerColor={playerColor} onSelect={onPromotionSelect} onCancel={onPromotionCancel} />
-            )}
-            {status === "gameover" && gameResult && (
-              <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center rounded-sm gap-4">
-                <div className="text-center">
-                  <div className="text-4xl mb-2">
-                    {gameResult === "You Win!" ? "🏆" : gameResult === "Bot Wins!" ? "😔" : "🤝"}
-                  </div>
-                  <h2 className="text-white text-2xl font-black">{gameResult}</h2>
-                </div>
-                <button onClick={() => newGame()} className="px-8 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl transition-colors">
-                  Play Again
-                </button>
-              </div>
-            )}
+          <div ref={desktopBoardRef} className="relative" style={{ width: "min(calc(100vw - 340px), calc(100vh - 120px))", maxWidth: 520 }}>
+            <Chessboard options={boardOptions} />
+            {promotionMove && <PromotionDialog playerColor={playerColor} onSelect={onPromotionSelect} onCancel={() => setPromotionMove(null)} />}
+            {gameOverOverlay}
           </div>
         </div>
-        {/* Controls */}
-        <div className="w-72 flex-shrink-0 flex flex-col gap-4">
+        <div className="w-72 flex-shrink-0">
           <ControlsPanel
-            difficulty={difficulty}
-            playerColor={playerColor}
-            status={status}
-            moveHistory={moveHistory}
-            evaluation={evaluation}
-            isThinking={isThinking}
+            difficulty={difficulty} playerColor={playerColor} status={status}
+            moveHistory={moveHistory} evaluation={evaluation} isThinking={isThinking}
             onDifficultyChange={(d) => { setDifficulty(d); newGame(playerColor, d); }}
             onColorChange={(c) => setPlayerColor(c)}
             onNewGame={() => newGame()}
             onFlip={() => setBoardOrientation((o) => (o === "white" ? "black" : "white"))}
-            onUndo={undoMove}
-            onHint={getHint}
+            onUndo={undoMove} onHint={getHint}
           />
         </div>
       </div>
 
-      {/* ── Mobile layout ── */}
+      {/* ── Mobile layout (< lg) ── */}
       <div className="lg:hidden flex flex-col flex-1 overflow-hidden">
 
-        {/* Mobile tab switcher */}
+        {/* Tab bar */}
         <div className="flex border-b border-[#2a2d4a] flex-shrink-0">
-          <button
-            onClick={() => setMobileTab("board")}
-            className={`flex-1 py-2 text-sm font-semibold transition-colors ${
-              mobileTab === "board"
-                ? "text-indigo-400 border-b-2 border-indigo-400"
-                : "text-[#8b8fa8]"
-            }`}
-          >
-            Board
-          </button>
-          <button
-            onClick={() => setMobileTab("controls")}
-            className={`flex-1 py-2 text-sm font-semibold transition-colors ${
-              mobileTab === "controls"
-                ? "text-indigo-400 border-b-2 border-indigo-400"
-                : "text-[#8b8fa8]"
-            }`}
-          >
-            Controls {moveHistory.length > 0 && `(${moveHistory.length})`}
-          </button>
+          {(["board", "controls"] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setMobileTab(tab)}
+              className={`flex-1 py-2.5 text-sm font-semibold capitalize transition-colors ${
+                mobileTab === tab ? "text-indigo-400 border-b-2 border-indigo-400" : "text-[#8b8fa8]"
+              }`}
+            >
+              {tab === "controls" && moveHistory.length > 0 ? `Controls (${moveHistory.length})` : tab === "board" ? "Board" : "Controls"}
+            </button>
+          ))}
         </div>
 
-        {/* Board tab */}
-        {mobileTab === "board" && (
-          <div className="flex flex-col flex-1 overflow-hidden">
-            {/* Board fills full width */}
-            <div
-              className="relative"
-              style={{ width: boardWidth, height: boardWidth }}
-            >
-              <Chessboard
-                options={{
-                  position: fen,
-                  boardOrientation,
-                  squareStyles: customSquareStyles,
-                  animationDurationInMs: 200,
-                  darkSquareStyle: { backgroundColor: "#4a4a8a" },
-                  lightSquareStyle: { backgroundColor: "#d4d4f0" },
-                  boardStyle: { width: boardWidth, height: boardWidth },
-                  onSquareClick: ({ square }) => onSquareClick(square),
-                  onPieceDrop: ({ sourceSquare, targetSquare, piece }) =>
-                    onPieceDrop(sourceSquare, targetSquare ?? "", piece.pieceType),
-                }}
-              />
-              {promotionMove && (
-                <PromotionDialog playerColor={playerColor} onSelect={onPromotionSelect} onCancel={onPromotionCancel} />
-              )}
-              {status === "gameover" && gameResult && (
-                <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center gap-4">
-                  <div className="text-center">
-                    <div className="text-4xl mb-2">
-                      {gameResult === "You Win!" ? "🏆" : gameResult === "Bot Wins!" ? "😔" : "🤝"}
-                    </div>
-                    <h2 className="text-white text-2xl font-black">{gameResult}</h2>
-                  </div>
-                  <button onClick={() => newGame()} className="px-8 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl transition-colors">
-                    Play Again
-                  </button>
-                </div>
-              )}
-            </div>
+        {/*
+          IMPORTANT: Both panels are always mounted — we use display:none to hide
+          the inactive one. This prevents the Chessboard from unmounting/remounting
+          on every state change, which caused the blank-board bug.
+        */}
 
-            {/* Quick action bar below board on mobile */}
-            <div className="flex gap-2 px-3 py-2 border-t border-[#2a2d4a] flex-shrink-0">
-              <button
-                onClick={() => newGame()}
-                className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white text-sm font-semibold transition-colors"
-              >
-                New Game
-              </button>
-              <button
-                onClick={() => setBoardOrientation((o) => (o === "white" ? "black" : "white"))}
-                className="flex-1 py-2.5 rounded-xl bg-[#16213e] border border-[#2a2d4a] text-white text-sm font-semibold transition-colors active:bg-[#1e2a4a]"
-              >
-                Flip
-              </button>
-              <button
-                onClick={undoMove}
-                disabled={moveHistory.length < 2 || status !== "playing"}
-                className="flex-1 py-2.5 rounded-xl bg-[#16213e] border border-[#2a2d4a] text-white text-sm font-semibold transition-colors active:bg-[#1e2a4a] disabled:opacity-40"
-              >
-                Undo
-              </button>
-              <button
-                onClick={getHint}
-                disabled={status !== "playing" || isThinking}
-                className="flex-1 py-2.5 rounded-xl bg-[#16213e] border border-[#2a2d4a] text-amber-400 text-sm font-semibold transition-colors active:bg-[#1e2a4a] disabled:opacity-40"
-              >
-                Hint
-              </button>
-            </div>
+        {/* Board panel */}
+        <div
+          className="flex flex-col flex-1 overflow-hidden"
+          style={{ display: mobileTab === "board" ? "flex" : "none" }}
+        >
+          {/* Board container — full width square */}
+          <div
+            ref={mobileBoardRef}
+            className="relative w-full"
+            style={{ aspectRatio: "1 / 1", flexShrink: 0 }}
+          >
+            <Chessboard options={boardOptions} />
+            {promotionMove && <PromotionDialog playerColor={playerColor} onSelect={onPromotionSelect} onCancel={() => setPromotionMove(null)} />}
+            {gameOverOverlay}
           </div>
-        )}
 
-        {/* Controls tab */}
-        {mobileTab === "controls" && (
-          <div className="flex-1 overflow-y-auto p-3">
-            <ControlsPanel
-              difficulty={difficulty}
-              playerColor={playerColor}
-              status={status}
-              moveHistory={moveHistory}
-              evaluation={evaluation}
-              isThinking={isThinking}
-              onDifficultyChange={(d) => { setDifficulty(d); newGame(playerColor, d); }}
-              onColorChange={(c) => setPlayerColor(c)}
-              onNewGame={() => { newGame(); setMobileTab("board"); }}
-              onFlip={() => setBoardOrientation((o) => (o === "white" ? "black" : "white"))}
-              onUndo={undoMove}
-              onHint={getHint}
-            />
+          {/* Quick action bar */}
+          <div className="flex gap-2 px-3 py-2 border-t border-[#2a2d4a] flex-shrink-0">
+            {[
+              { label: "New", action: () => newGame(), color: "bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white" },
+              { label: "Flip", action: () => setBoardOrientation((o) => (o === "white" ? "black" : "white")), color: "bg-[#16213e] border border-[#2a2d4a] text-white active:bg-[#1e2a4a]" },
+              { label: "Undo", action: undoMove, disabled: moveHistory.length < 2 || status !== "playing", color: "bg-[#16213e] border border-[#2a2d4a] text-white active:bg-[#1e2a4a]" },
+              { label: "Hint", action: getHint, disabled: status !== "playing" || isThinking, color: "bg-[#16213e] border border-[#2a2d4a] text-amber-400 active:bg-[#1e2a4a]" },
+            ].map(({ label, action, disabled, color }) => (
+              <button
+                key={label}
+                onClick={action}
+                disabled={disabled}
+                className={`flex-1 py-3 rounded-xl text-sm font-semibold transition-colors disabled:opacity-40 ${color}`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
-        )}
+        </div>
+
+        {/* Controls panel */}
+        <div
+          className="flex-1 overflow-y-auto p-3"
+          style={{ display: mobileTab === "controls" ? "block" : "none" }}
+        >
+          <ControlsPanel
+            difficulty={difficulty} playerColor={playerColor} status={status}
+            moveHistory={moveHistory} evaluation={evaluation} isThinking={isThinking}
+            onDifficultyChange={(d) => { setDifficulty(d); newGame(playerColor, d); }}
+            onColorChange={(c) => setPlayerColor(c)}
+            onNewGame={() => { newGame(); setMobileTab("board"); }}
+            onFlip={() => setBoardOrientation((o) => (o === "white" ? "black" : "white"))}
+            onUndo={undoMove} onHint={getHint}
+          />
+        </div>
       </div>
     </div>
   );

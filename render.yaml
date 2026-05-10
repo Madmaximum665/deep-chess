@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: deep-chess
+    runtime: static
+    buildCommand: pnpm install --ignore-scripts && pnpm --filter @workspace/deep-chess run build
+    staticPublishPath: artifacts/deep-chess/dist/public
+    pullRequestPreviewsEnabled: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
